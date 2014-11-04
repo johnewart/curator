@@ -1,10 +1,3 @@
-// Sometimes our Go programs need to spawn other, non-Go
-// processes. For example, the syntax highlighting on this
-// site is [implemented](https://github.com/mmcgrana/gobyexample/blob/master/tools/generate.go)
-// by spawning a [`pygmentize`](http://pygments.org/)
-// process from a Go program. Let's look at a few examples
-// of spawning processes from Go.
-
 package main
 
 import "fmt"
@@ -130,13 +123,7 @@ func spawnProcess(p Program) {
       cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
       stdoutPipe, _ := cmd.StdoutPipe()
       stderrPipe, _ := cmd.StderrPipe()
-      //programIn, _ := program.StdinPipe()
-      //programOut, _ := program.StdoutPipe()
-      //program.Stdout = w
-      //program.Stderr = w
-      //program.Stdout = os.Stdout
-      //program.Stderr = os.Stderr
-      //program.Stdout = os.Stdout
+
       e := cmd.Start()
       if e != nil {
         panic(e)
