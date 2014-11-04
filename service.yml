@@ -1,0 +1,31 @@
+command: "/usr/bin/java -jar /Users/jewart/Projects/chef-metal-demo/cookbooks/simpleserver/files/default/simplehttpserver-1.0-SNAPSHOT.jar"
+process_name: "simpleserver"
+numprocs: 1
+numprocs_start: 1
+priority: 999
+autostart: true
+autorestart: true
+start_secs: 1
+start_retries: 3
+exit_codes:
+ - 0
+ - 2
+stop_signal: TERM
+stop_wait_secs: 10
+user: jewart
+redirect_stderr: false
+directory: /tmp
+server_url: "simpleserver"
+environment:
+  HOME: "/tmp"
+output_streams:
+  stderr: 
+    log_file: 
+      path: /tmp/stderr.txt
+      maxbytes: 50000
+      backups: 10
+  stdout:
+    log_file:
+      path: /tmp/stdout.txt
+      maxbytes: 50000
+      backups: 5
