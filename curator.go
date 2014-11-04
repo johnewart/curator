@@ -10,7 +10,9 @@ import "strings"
 import "io"
 import "path"
 import "path/filepath"
-import "gofmt"
+import "log"
+import "syscall"
+import "regexp"
 
 type OutputStreams struct {
 	Stdout OutputStream
@@ -77,7 +79,7 @@ type Process struct {
 	State   State
 }
 
-var processTable map[string]Process
+var processTable map[string]*Process
 
 // TODO: check output file size and rotate.
 func flushStream(stdoutPipe io.ReadCloser, writer *bufio.Writer) {
@@ -122,18 +124,65 @@ func spawnProcess(p Program) {
 	stdoutPipe, _ := cmd.StdoutPipe()
 	stderrPipe, _ := cmd.StderrPipe()
 
+	go flushStream(stdoutPipe, outw)
+	go flushStream(stderrPipe, errw)
+
+	proc := new(Process)
+	proc.Program = p
+	proc.Command = cmd
+	proc.State = STARTING
+
+	fmt.Printf("Adding %s to process table\n", p.ProcessName)
+	processTable[p.ProcessName] = proc
+
+	log.Printf("Trying to start %s\n", proc.Program.ProcessName)
 	e := cmd.Start()
 	if e != nil {
 		panic(e)
 	}
 
-	go flushStream(stdoutPipe, outw)
-	go flushStream(stderrPipe, errw)
+	proc.State = RUNNING
+	if err := cmd.Wait(); err != nil {
+		if exiterr, ok := err.(*exec.ExitError); ok {
+			// The program has exited with an exit code != 0
 
-	defer cmd.Wait()
-	proc := Process{Program: p, Command: cmd, State: RUNNING}
-	fmt.Printf("Adding %s to process table\n", p.ProcessName)
-	processTable[p.ProcessName] = proc
+			// This works on both Unix and Windows. Although package
+			// syscall is generally platform dependent, WaitStatus is
+			// defined for both Unix and Windows and in both cases has
+			// an ExitStatus() method with the same signature.
+			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+				log.Printf("Exit Status: %d", status.ExitStatus())
+			}
+			proc.State = STOPPED
+		} else {
+			log.Fatalf("cmd.Wait: %v", err)
+		}
+	}
+
+}
+
+func startProgram(programName string) {
+	if proc, present := processTable[programName]; present {
+		if proc.State == RUNNING {
+			log.Print("Not starting a running program!")
+		} else {
+			log.Printf("Spawning process for %s", proc.Program.ProcessName)
+			go spawnProcess(proc.Program)
+		}
+	}
+}
+
+func terminateProgram(programName string) {
+	if proc, present := processTable[programName]; present {
+		cmd := proc.Command
+
+		if proc.State == STOPPED {
+			log.Printf("Nothing to do, process %s already stopped\n", programName)
+		} else {
+			log.Printf("Terminating program %s\n", programName)
+			cmd.Process.Kill()
+		}
+	}
 }
 
 func handleInput(channel chan string, kbd *bufio.Reader) {
@@ -158,7 +207,13 @@ func handleConfig(configFile string) {
 		panic(err)
 	}
 
-	go spawnProcess(p)
+	// TODO: handle forced reloading, which would terminate the
+	// process and then reload. For now only load new things.
+	if _, present := processTable[p.ProcessName]; !present {
+		fmt.Printf("Spawning %s\n", p.ProcessName)
+		go spawnProcess(p)
+	}
+
 }
 
 func loadConfigs(srcDir string) {
@@ -166,30 +221,53 @@ func loadConfigs(srcDir string) {
 	fmt.Printf("Loading files matching %s\n", globStr)
 	configFiles, _ := filepath.Glob(globStr)
 	for _, configFile := range configFiles {
-		fmt.Printf("Loading %s...\n", configFile)
+		fmt.Printf("Processing %s...\n", configFile)
 		handleConfig(configFile)
 	}
 }
 
 func main() {
-	processTable = make(map[string]Process)
+	processTable = make(map[string]*Process)
 	queue := make(chan string, 1)
 	cwd, _ := os.Getwd()
-	loadConfigs(cwd)
+	configDir := cwd
+	loadConfigs(configDir)
 
 	reader := bufio.NewReader(os.Stdin)
 	go handleInput(queue, reader)
 
+	var status = regexp.MustCompile(`^status\s*$`)
+	var reload = regexp.MustCompile(`^reload\s*$`)
+	var start = regexp.MustCompile(`^start (\w+?)\s*$`)
+	var stop = regexp.MustCompile(`^stop (\w+?)\s*$`)
+
 	for {
 		select {
 		case val := <-queue:
-			switch val {
-			case "STATUS":
+			switch {
+			case status.MatchString(val):
 				{
 					fmt.Println("Checking status...")
 					for k, p := range processTable {
 						fmt.Printf("%s: %s\n", k, p.State)
 					}
+				}
+			case reload.MatchString(val):
+				{
+					fmt.Println("Loading new configs...")
+					loadConfigs(configDir)
+				}
+			case start.MatchString(val):
+				{
+					result := start.FindStringSubmatch(val)
+					program := result[1]
+					startProgram(program)
+				}
+			case stop.MatchString(val):
+				{
+					result := stop.FindStringSubmatch(val)
+					program := result[1]
+					terminateProgram(program)
 				}
 			}
 		}
