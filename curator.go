@@ -1,18 +1,25 @@
 package main
 
-import "fmt"
-import "io/ioutil"
-import "os/exec"
-import "gopkg.in/yaml.v2"
-import "os"
-import "bufio"
-import "strings"
-import "io"
-import "path"
-import "path/filepath"
-import "log"
-import "syscall"
-import "regexp"
+import (
+    "fmt"
+    "io/ioutil"
+    "os/exec"
+    "gopkg.in/yaml.v2"
+    "os"
+    "bufio"
+    "strings"
+    "io"
+    "path"
+    "path/filepath"
+    "log"
+    "syscall"
+	"net/http"
+	"encoding/json"
+
+	"github.com/gorilla/mux"
+	"text/template"
+	"bytes"
+)
 
 type OutputStreams struct {
 	Stdout OutputStream
@@ -30,6 +37,7 @@ type LogFile struct {
 }
 
 type Program struct {
+	Name           string
 	Command        string
 	ProcessName    string `yaml:"process_name"`
 	Numprocs       int
@@ -57,6 +65,7 @@ const (
 	STARTING
 	RUNNING
 	STOPPING
+	FAILED
 )
 
 func (s State) String() string {
@@ -69,17 +78,30 @@ func (s State) String() string {
 		return "RUNNING"
 	case STOPPING:
 		return "STOPPING"
+	case FAILED:
+		return "FAILED"
 	}
 	return ""
 }
 
-type Process struct {
-	Program Program
-	Command *exec.Cmd
+type ManagedProcess struct {
+	Title   string
+	Command string
+	Process *exec.Cmd
 	State   State
+	OutputStreams  OutputStreams
+	ProgramName string
+	StartCount int
+	Terminated bool
 }
 
-var processTable map[string]*Process
+type ProcessMetadata struct {
+	ProcessNumber int
+	ProcessName string
+}
+
+var processTable map[string]*ManagedProcess
+var programTable map[string]*Program
 
 // TODO: check output file size and rotate.
 func flushStream(stdoutPipe io.ReadCloser, writer *bufio.Writer) {
@@ -96,181 +118,245 @@ func flushStream(stdoutPipe io.ReadCloser, writer *bufio.Writer) {
 	}
 }
 
-func spawnProcess(p Program) {
-	fmt.Printf("Process: %s\n", p.ProcessName)
-	stdoutPath := p.OutputStreams.Stdout.LogFile.Path
-	stderrPath := p.OutputStreams.Stderr.LogFile.Path
+func spawnProcess(proc ManagedProcess) {
+	log.Printf("[%s] Spawning process...\n", proc.Title)
+	program := programTable[proc.ProgramName]
 
-	fmt.Printf("Writing STDOUT to %s\n", stdoutPath)
-	fmt.Printf("Writing STDERR to %s\n", stderrPath)
-	outf, err := os.Create(stdoutPath)
-	if err != nil {
-		panic(err)
-	}
+	for i := 0; i < program.StartRetries && !proc.Terminated; i++ {
+		proc.StartCount++
+		log.Printf("[%s] Running %d/%d times...\n", proc.Title, i, program.StartRetries)
 
-	errf, err := os.Create(stderrPath)
-	if err != nil {
-		panic(err)
-	}
+		stdoutPath := proc.OutputStreams.Stdout.LogFile.Path
+		stderrPath := proc.OutputStreams.Stderr.LogFile.Path
 
-	outw := bufio.NewWriter(outf)
-	errw := bufio.NewWriter(errf)
-
-	fmt.Printf("Going to run %s\n", p.Command)
-	cmdParts := strings.Split(p.Command, " ")
-	fmt.Println(cmdParts)
-
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
-	stdoutPipe, _ := cmd.StdoutPipe()
-	stderrPipe, _ := cmd.StderrPipe()
-
-	go flushStream(stdoutPipe, outw)
-	go flushStream(stderrPipe, errw)
-
-	proc := new(Process)
-	proc.Program = p
-	proc.Command = cmd
-	proc.State = STARTING
-
-	fmt.Printf("Adding %s to process table\n", p.ProcessName)
-	processTable[p.ProcessName] = proc
-
-	log.Printf("Trying to start %s\n", proc.Program.ProcessName)
-	e := cmd.Start()
-	if e != nil {
-		panic(e)
-	}
-
-	proc.State = RUNNING
-	if err := cmd.Wait(); err != nil {
-		if exiterr, ok := err.(*exec.ExitError); ok {
-			// The program has exited with an exit code != 0
-
-			// This works on both Unix and Windows. Although package
-			// syscall is generally platform dependent, WaitStatus is
-			// defined for both Unix and Windows and in both cases has
-			// an ExitStatus() method with the same signature.
-			if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
-				log.Printf("Exit Status: %d", status.ExitStatus())
-			}
-			proc.State = STOPPED
-		} else {
-			log.Fatalf("cmd.Wait: %v", err)
+		log.Printf("[%s] Writing STDOUT to %s\n", proc.Title, stdoutPath)
+		log.Printf("[%s] Writing STDERR to %s\n", proc.Title, stderrPath)
+		outf, err := os.Create(stdoutPath)
+		if err != nil {
+			panic(err)
 		}
+
+		errf, err := os.Create(stderrPath)
+		if err != nil {
+			panic(err)
+		}
+
+		outw := bufio.NewWriter(outf)
+		errw := bufio.NewWriter(errf)
+
+		log.Printf("[%s] Command: %s\n", proc.Title, proc.Command)
+		cmdParts := strings.Split(proc.Command, " ")
+
+		cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
+		stdoutPipe, _ := cmd.StdoutPipe()
+		stderrPipe, _ := cmd.StderrPipe()
+
+		go flushStream(stdoutPipe, outw)
+		go flushStream(stderrPipe, errw)
+
+		proc.State = STARTING
+		proc.Process = cmd
+
+		log.Printf("[%s] Adding '%s' to process table\n", proc.Title, proc.Title)
+		processTable[proc.Title] = &proc
+
+		e := cmd.Start()
+		if e != nil {
+			panic(e)
+		}
+
+		proc.State = RUNNING
+
+		if err := cmd.Wait(); err != nil {
+			if exiterr, ok := err.(*exec.ExitError); ok {
+				// The program has exited with an exit code != 0
+
+				// This works on both Unix and Windows. Although package
+				// syscall is generally platform dependent, WaitStatus is
+				// defined for both Unix and Windows and in both cases has
+				// an ExitStatus() method with the same signature.
+				if status, ok := exiterr.Sys().(syscall.WaitStatus); ok {
+					log.Printf("[%s] Exit Status: %d", proc.Title, status.ExitStatus())
+				}
+				proc.State = STOPPED
+			} else {
+				log.Fatalf("[%s] cmd.Wait: %v", proc.Title, err)
+			}
+		} else {
+			log.Printf("[%s] Exited gracefully.", proc.Title)
+			proc.State = STOPPED
+		}
+
 	}
+
+	if proc.StartCount == program.StartRetries {
+		log.Printf("[%s] Tried to startup %d times, marking as FAILED", proc.Title, program.StartRetries)
+		proc.State = FAILED
+	}
+
+	if proc.Terminated {
+		log.Printf("[%s] Terminated on command", proc.Title)
+		proc.State = STOPPED
+	}
+
 
 }
 
 func startProgram(programName string) {
 	if proc, present := processTable[programName]; present {
 		if proc.State == RUNNING {
-			log.Print("Not starting a running program!")
+			log.Print("[curator] Not starting a running program!")
 		} else {
-			log.Printf("Spawning process for %s", proc.Program.ProcessName)
-			go spawnProcess(proc.Program)
+			proc.Terminated = false
+			proc.StartCount = 0
+			log.Printf("[curator] Spawning process for %s", proc.Title)
+			go spawnProcess(*proc)
 		}
 	}
 }
 
 func terminateProgram(programName string) {
 	if proc, present := processTable[programName]; present {
-		cmd := proc.Command
+		cmd := proc.Process
 
 		if proc.State == STOPPED {
-			log.Printf("Nothing to do, process %s already stopped\n", programName)
+			log.Printf("[curator] Nothing to do, process %s already stopped\n", programName)
 		} else {
-			log.Printf("Terminating program %s\n", programName)
+			log.Printf("[curator] Terminating program %s\n", programName)
+			proc.State = STOPPED
+			proc.Terminated = true
 			cmd.Process.Kill()
+			proc.Process = nil
 		}
 	}
 }
 
-func handleInput(channel chan string, kbd *bufio.Reader) {
-	for {
-		fmt.Print("CMD: ")
-		text, _ := kbd.ReadString('\n')
-		text = strings.TrimSpace(text)
-		channel <- text
-	}
-}
-
 func handleConfig(configFile string) {
-	var p Program
+	var p *Program = new(Program)
 	var fileData, err = ioutil.ReadFile(configFile)
 
 	if err != nil {
 		panic(err)
 	}
 
-	err = yaml.Unmarshal(fileData, &p)
+	err = yaml.Unmarshal(fileData, p)
 	if err != nil {
 		panic(err)
 	}
 
-	// TODO: handle forced reloading, which would terminate the
-	// process and then reload. For now only load new things.
-	if _, present := processTable[p.ProcessName]; !present {
-		fmt.Printf("Spawning %s\n", p.ProcessName)
-		go spawnProcess(p)
-	}
+	p.Name = strings.Replace(configFile, ".yml", "", 1)
+	programTable[p.Name] = p
 
-}
+	if p.Autostart {
+		for i := p.NumprocsStart; i < p.Numprocs + p.NumprocsStart; i++ {
+			pm := ProcessMetadata{
+				ProcessNumber: i,
+				ProcessName: p.ProcessName,
+			}
 
-func loadConfigs(srcDir string) {
-	globStr := path.Join(srcDir, "*.yml")
-	fmt.Printf("Loading files matching %s\n", globStr)
-	configFiles, _ := filepath.Glob(globStr)
-	for _, configFile := range configFiles {
-		fmt.Printf("Processing %s...\n", configFile)
-		handleConfig(configFile)
-	}
-}
+			processTitle, _ := injectProcessMetadata(p.ProcessName, &pm)
+			commandString, _ := injectProcessMetadata(p.Command, &pm)
+			stderrLogFile, _ := injectProcessMetadata(p.OutputStreams.Stderr.LogFile.Path, &pm)
+			stdoutLogFile, _ := injectProcessMetadata(p.OutputStreams.Stdout.LogFile.Path, &pm)
 
-func main() {
-	processTable = make(map[string]*Process)
-	queue := make(chan string, 1)
-	cwd, _ := os.Getwd()
-	configDir := cwd
-	loadConfigs(configDir)
+			newOutputStreams := p.OutputStreams
+			newOutputStreams.Stderr.LogFile.Path = stderrLogFile
+			newOutputStreams.Stdout.LogFile.Path = stdoutLogFile
 
-	reader := bufio.NewReader(os.Stdin)
-	go handleInput(queue, reader)
-
-	var status = regexp.MustCompile(`^status\s*$`)
-	var reload = regexp.MustCompile(`^reload\s*$`)
-	var start = regexp.MustCompile(`^start (\w+?)\s*$`)
-	var stop = regexp.MustCompile(`^stop (\w+?)\s*$`)
-
-	for {
-		select {
-		case val := <-queue:
-			switch {
-			case status.MatchString(val):
-				{
-					fmt.Println("Checking status...")
-					for k, p := range processTable {
-						fmt.Printf("%s: %s\n", k, p.State)
-					}
+			// TODO: handle forced reloading, which would terminate the
+			// process and then reload. For now only load new things.
+			if _, present := processTable[processTitle]; !present {
+				log.Printf("[curator] Spawning %s\n", processTitle)
+				proc := ManagedProcess{
+					ProgramName: p.Name,
+					Title: processTitle,
+					Command: commandString,
+					OutputStreams: newOutputStreams,
+					Terminated: false,
+					StartCount: 0,
 				}
-			case reload.MatchString(val):
-				{
-					fmt.Println("Loading new configs...")
-					loadConfigs(configDir)
-				}
-			case start.MatchString(val):
-				{
-					result := start.FindStringSubmatch(val)
-					program := result[1]
-					startProgram(program)
-				}
-			case stop.MatchString(val):
-				{
-					result := stop.FindStringSubmatch(val)
-					program := result[1]
-					terminateProgram(program)
-				}
+				go spawnProcess(proc)
 			}
 		}
 	}
 
+}
+
+func injectProcessMetadata(templateData string, metadata *ProcessMetadata) (string, error) {
+	var doc bytes.Buffer
+	tmpl, err := template.New("processname").Parse(templateData)
+
+	if err != nil {
+		return "", fmt.Errorf("Unable to process '%s': %s", templateData, err)
+	}
+
+	tmpl.Execute(&doc, *metadata)
+	return doc.String(), nil
+}
+
+func loadConfigs(srcDir string) {
+	globStr := path.Join(srcDir, "*.yml")
+	log.Printf("[curator] Loading files matching %s\n", globStr)
+	configFiles, _ := filepath.Glob(globStr)
+	for _, configFile := range configFiles {
+		log.Printf("[curator] Processing %s...\n", configFile)
+		handleConfig(configFile)
+	}
+}
+
+func Index(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "application/json")
+	processes := make(map[string]string)
+	for k, p := range processTable {
+		processes[k] = fmt.Sprintf("%s", p.State)
+	}
+	json.NewEncoder(w).Encode(processes)
+}
+
+func ShowProcess(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	processName := vars["processName"]
+	w.Header().Add("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(processTable[processName])
+}
+
+func StopProcess(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	processName := vars["processName"]
+	terminateProgram(processName)
+	w.Header().Add("Content-Type", "application/json")
+	fmt.Fprint(w, "OK")
+}
+
+func StartProcess(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	processName := vars["processName"]
+	startProgram(processName)
+	w.Header().Add("Content-Type", "application/json")
+	fmt.Fprint(w, "OK")
+}
+
+func ReloadConfigs(w http.ResponseWriter, r *http.Request) {
+	cwd, _ := os.Getwd()
+	configDir := cwd
+	loadConfigs(configDir)
+	w.Header().Add("Content-Type", "application/json")
+	fmt.Fprint(w, "OK")
+}
+
+func main() {
+	processTable = make(map[string]*ManagedProcess)
+	programTable = make(map[string]*Program)
+	cwd, _ := os.Getwd()
+	configDir := cwd
+	loadConfigs(configDir)
+
+	router := mux.NewRouter().StrictSlash(true)
+	router.HandleFunc("/", Index)
+	router.HandleFunc("/reload", ReloadConfigs)
+	router.HandleFunc("/processes/{processName}", ShowProcess)
+	router.HandleFunc("/processes/{processName}/stop", StopProcess)
+	router.HandleFunc("/processes/{processName}/start", StartProcess)
+
+	log.Fatal(http.ListenAndServe(":8080", router))
 }

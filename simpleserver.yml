@@ -1,9 +1,9 @@
-command: "python -mSimpleHTTPServer"
-process_name: "simpleserver"
-numprocs: 1
+command: "python -mSimpleHTTPServer 800{{.ProcessNumber}}"
+process_name: "simplehttpserver_{{.ProcessNumber}}"
+numprocs: 2
 numprocs_start: 1
 priority: 999
-autostart: false
+autostart: true
 autorestart: true
 start_secs: 1
 start_retries: 3
@@ -15,17 +15,17 @@ stop_wait_secs: 10
 user: jewart
 redirect_stderr: false
 directory: /tmp
-server_url: "simpleserver"
+server_url: "simplehttpserver"
 environment:
   HOME: "/tmp"
 output_streams:
   stderr: 
     log_file: 
-      path: /tmp/stderr.txt
+      path: /tmp/simpleserver-stderr-{{.ProcessNumber}}.txt
       maxbytes: 50000
       backups: 10
   stdout:
     log_file:
-      path: /tmp/stdout.txt
+      path: /tmp/simpleserver-stdout-{{.ProcessNumber}}.txt
       maxbytes: 50000
       backups: 5
