@@ -14,6 +14,7 @@ remove the need for an interpreter.
 * HTML dashboard via HTTP
 * Force reload processes on reload of configuration (if requested)
 * Metrics emitting
+* Service dependency modeling (local and remote)
 
 ## Authors
 
