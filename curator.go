@@ -1,24 +1,25 @@
 package main
 
 import (
-    "fmt"
-    "io/ioutil"
-    "os/exec"
-    "gopkg.in/yaml.v2"
-    "os"
-    "bufio"
-    "strings"
-    "io"
-    "path"
-    "path/filepath"
-    "log"
-    "syscall"
-	"net/http"
+	"bufio"
 	"encoding/json"
+	"fmt"
+	"gopkg.in/yaml.v2"
+	"io"
+	"io/ioutil"
+	"log"
+	"net/http"
+	_ "net/http/pprof"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"strings"
+	"syscall"
 
+	"bytes"
 	"github.com/gorilla/mux"
 	"text/template"
-	"bytes"
 )
 
 type OutputStreams struct {
@@ -85,36 +86,61 @@ func (s State) String() string {
 }
 
 type ManagedProcess struct {
-	Title   string
-	Command string
-	Process *exec.Cmd
-	State   State
-	OutputStreams  OutputStreams
-	ProgramName string
-	StartCount int
-	Terminated bool
+	Title         string
+	Command       string
+	Process       *exec.Cmd
+	State         State
+	OutputStreams OutputStreams
+	ProgramName   string
+	StartCount    int
+	Terminated    bool
 }
 
 type ProcessMetadata struct {
 	ProcessNumber int
-	ProcessName string
+	ProcessName   string
 }
 
 var processTable map[string]*ManagedProcess
 var programTable map[string]*Program
 
+func makeReadChan(r io.Reader, bufSize int) (chan []byte, chan error) {
+	read := make(chan []byte)
+	errc := make(chan error, 1)
+	go func() {
+		for {
+			b := make([]byte, bufSize)
+			n, err := r.Read(b)
+			if err != nil {
+				fmt.Print("Error!")
+				close(read)
+				errc <- err
+				return
+			}
+			if n > 0 {
+				fmt.Print("Read %d bytes\n", n)
+				read <- b[0:n]
+			}
+		}
+	}()
+	return read, errc
+}
+
 // TODO: check output file size and rotate.
-func flushStream(stdoutPipe io.ReadCloser, writer *bufio.Writer) {
+func flushStream(stdoutPipe *BlockReadWriter, writer *bufio.Writer) {
 	buffer := make([]byte, 100, 1000)
+
 	for {
 		n, err := stdoutPipe.Read(buffer)
-		if err == io.EOF {
-			stdoutPipe.Close()
-			break
-		}
 		buffer = buffer[0:n]
 		writer.Write(buffer)
 		writer.Flush()
+
+		if err == io.EOF {
+			//stdoutPipe.Close()
+			fmt.Printf("EOF\n")
+			break
+		}
 	}
 }
 
@@ -148,8 +174,12 @@ func spawnProcess(proc ManagedProcess) {
 		cmdParts := strings.Split(proc.Command, " ")
 
 		cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
-		stdoutPipe, _ := cmd.StdoutPipe()
-		stderrPipe, _ := cmd.StderrPipe()
+
+		stdoutPipe := NewBlockReadWriter()
+		stderrPipe := NewBlockReadWriter()
+
+		cmd.Stdout = stdoutPipe
+		cmd.Stderr = stderrPipe
 
 		go flushStream(stdoutPipe, outw)
 		go flushStream(stderrPipe, errw)
@@ -199,7 +229,6 @@ func spawnProcess(proc ManagedProcess) {
 		proc.State = STOPPED
 	}
 
-
 }
 
 func startProgram(programName string) {
@@ -241,17 +270,18 @@ func handleConfig(configFile string) {
 
 	err = yaml.Unmarshal(fileData, p)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Error parsing YAML file '%s': %s", configFile, err)
+		return
 	}
 
 	p.Name = strings.Replace(configFile, ".yml", "", 1)
 	programTable[p.Name] = p
 
 	if p.Autostart {
-		for i := p.NumprocsStart; i < p.Numprocs + p.NumprocsStart; i++ {
+		for i := p.NumprocsStart; i < p.Numprocs+p.NumprocsStart; i++ {
 			pm := ProcessMetadata{
 				ProcessNumber: i,
-				ProcessName: p.ProcessName,
+				ProcessName:   p.ProcessName,
 			}
 
 			processTitle, _ := injectProcessMetadata(p.ProcessName, &pm)
@@ -268,12 +298,12 @@ func handleConfig(configFile string) {
 			if _, present := processTable[processTitle]; !present {
 				log.Printf("[curator] Spawning %s\n", processTitle)
 				proc := ManagedProcess{
-					ProgramName: p.Name,
-					Title: processTitle,
-					Command: commandString,
+					ProgramName:   p.Name,
+					Title:         processTitle,
+					Command:       commandString,
 					OutputStreams: newOutputStreams,
-					Terminated: false,
-					StartCount: 0,
+					Terminated:    false,
+					StartCount:    0,
 				}
 				go spawnProcess(proc)
 			}
@@ -345,6 +375,11 @@ func ReloadConfigs(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	processTable = make(map[string]*ManagedProcess)
 	programTable = make(map[string]*Program)
 	cwd, _ := os.Getwd()
