@@ -1,4 +1,4 @@
-command: "python -mSimpleHTTPServer"
+command: "C:\Development\Python27\python -mSimpleHTTPServer"
 process_name: "simpleserver"
 numprocs: 1
 numprocs_start: 1
@@ -17,15 +17,15 @@ redirect_stderr: false
 directory: /tmp
 server_url: "simpleserver"
 environment:
-  HOME: "/tmp"
+  HOME: "C:\Temp"
 output_streams:
   stderr: 
     log_file: 
-      path: /tmp/stderr.txt
+      path: C:\temp\stderr.txt
       maxbytes: 50000
       backups: 10
   stdout:
     log_file:
-      path: /tmp/stdout.txt
+      path: C:\temp\stdout.txt
       maxbytes: 50000
       backups: 5

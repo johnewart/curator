@@ -1,0 +1,20 @@
+command: "ls -1 /tmp"
+process_name: "ls"
+numprocs: 1
+numprocs_start: 1
+priority: 999
+autostart: true
+autorestart: true
+start_secs: 1
+start_retries: 3
+exit_codes:
+ - 0
+ - 2
+stop_signal: TERM
+stop_wait_secs: 10
+user: jewart
+redirect_stderr: false
+directory: /tmp
+server_url: "ls"
+environment:
+  HOME: "/tmp"

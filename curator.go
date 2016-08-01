@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"gopkg.in/yaml.v2"
 	"io"
@@ -104,28 +105,6 @@ type ProcessMetadata struct {
 var processTable map[string]*ManagedProcess
 var programTable map[string]*Program
 
-func makeReadChan(r io.Reader, bufSize int) (chan []byte, chan error) {
-	read := make(chan []byte)
-	errc := make(chan error, 1)
-	go func() {
-		for {
-			b := make([]byte, bufSize)
-			n, err := r.Read(b)
-			if err != nil {
-				fmt.Print("Error!")
-				close(read)
-				errc <- err
-				return
-			}
-			if n > 0 {
-				fmt.Print("Read %d bytes\n", n)
-				read <- b[0:n]
-			}
-		}
-	}()
-	return read, errc
-}
-
 // TODO: check output file size and rotate.
 func flushStream(stdoutPipe *BlockReadWriter, writer *bufio.Writer) {
 	buffer := make([]byte, 100, 1000)
@@ -155,34 +134,43 @@ func spawnProcess(proc ManagedProcess) {
 		stdoutPath := proc.OutputStreams.Stdout.LogFile.Path
 		stderrPath := proc.OutputStreams.Stderr.LogFile.Path
 
-		log.Printf("[%s] Writing STDOUT to %s\n", proc.Title, stdoutPath)
-		log.Printf("[%s] Writing STDERR to %s\n", proc.Title, stderrPath)
-		outf, err := os.Create(stdoutPath)
-		if err != nil {
-			panic(err)
+		// Handle stdout
+		outw := bufio.NewWriter(ioutil.Discard)
+		errw := bufio.NewWriter(ioutil.Discard)
+
+		if stdoutPath != "" {
+			log.Printf("[%s] Writing STDOUT to %s\n", proc.Title, stdoutPath)
+			outf, err := os.Create(stdoutPath)
+			if err != nil {
+				panic(err)
+			}
+
+			outw = bufio.NewWriter(outf)
 		}
 
-		errf, err := os.Create(stderrPath)
-		if err != nil {
-			panic(err)
+		if stderrPath != "" {
+			log.Printf("[%s] Writing STDERR to %s\n", proc.Title, stderrPath)
+			errf, err := os.Create(stderrPath)
+			if err != nil {
+				panic(err)
+			}
+
+			errw = bufio.NewWriter(errf)
 		}
 
-		outw := bufio.NewWriter(outf)
-		errw := bufio.NewWriter(errf)
+		stdoutPipe := NewBlockReadWriter()
+		go flushStream(stdoutPipe, outw)
+
+		stderrPipe := NewBlockReadWriter()
+		go flushStream(stderrPipe, errw)
 
 		log.Printf("[%s] Command: %s\n", proc.Title, proc.Command)
 		cmdParts := strings.Split(proc.Command, " ")
 
 		cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
 
-		stdoutPipe := NewBlockReadWriter()
-		stderrPipe := NewBlockReadWriter()
-
 		cmd.Stdout = stdoutPipe
 		cmd.Stderr = stderrPipe
-
-		go flushStream(stdoutPipe, outw)
-		go flushStream(stderrPipe, errw)
 
 		proc.State = STARTING
 		proc.Process = cmd
@@ -376,15 +364,18 @@ func ReloadConfigs(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
-
 	processTable = make(map[string]*ManagedProcess)
 	programTable = make(map[string]*Program)
-	cwd, _ := os.Getwd()
-	configDir := cwd
-	loadConfigs(configDir)
+	configDir := flag.String("configDir", ".", "Where to load YAML files from")
+
+	flag.Parse()
+
+	if *configDir == "." {
+		cwd, _ := os.Getwd()
+		configDir = &cwd
+	}
+
+	loadConfigs(*configDir)
 
 	router := mux.NewRouter().StrictSlash(true)
 	router.HandleFunc("/", Index)

@@ -1,0 +1,31 @@
+command: "C:/Development/Python27/python -mSimpleHTTPServer"
+process_name: "simpleserver"
+numprocs: 1
+numprocs_start: 1
+priority: 999
+autostart: false
+autorestart: true
+start_secs: 1
+start_retries: 3
+exit_codes:
+ - 0
+ - 2
+stop_signal: TERM
+stop_wait_secs: 10
+user: jewart
+redirect_stderr: false
+directory: "C:/temp"
+server_url: "simpleserver"
+environment:
+  HOME: "C:/Temp"
+output_streams:
+  stderr: 
+    log_file: 
+      path: "C:/temp/stderr.txt"
+      maxbytes: 50000
+      backups: 10
+  stdout:
+    log_file:
+      path: "C:/temp/stdout.txt"
+      maxbytes: 50000
+      backups: 5
